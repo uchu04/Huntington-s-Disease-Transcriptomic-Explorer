@@ -1,0 +1,92 @@
+```{r}
+library(tidyverse)
+library(GEOquery)
+library(DESeq2)
+library(fgsea)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+```
+
+```{r}
+# ── 1. Sample metadata ───────────────────────────────────────
+con   <- file("data/GSE64810_series_matrix.txt", "r")
+lines <- base::readLines(con)
+close(con)
+
+# Parse sample IDs directly from the series matrix
+id_line    <- lines[grepl("^!Sample_geo_accession", lines)]
+sample_ids <- gsub('"', '', strsplit(id_line, "\t")[[1]][-1])
+
+# verify they look right
+head(sample_ids)  # should show GSM1580869, GSM1580870, etc.
+
+# Parse characteristic fields
+char_lines <- lines[grepl("^!Sample_characteristics_ch1", lines)]
+
+parse_char <- function(line, prefix) {
+  vals <- gsub('"', '', strsplit(line, "\t")[[1]][-1])
+  as.character(sub(prefix, "", vals))
+}
+
+metadata <- data.frame(
+  sample_id    = sample_ids,
+  tissue       = parse_char(char_lines[1], "tissue: "),
+  diagnosis    = parse_char(char_lines[2], "diagnosis: "),
+  pmi          = as.numeric(parse_char(char_lines[3], "pmi: ")),
+  age_of_death = as.numeric(parse_char(char_lines[4], "age of death: ")),
+  rin          = as.numeric(parse_char(char_lines[5], "rin: ")),
+  stringsAsFactors = FALSE
+)
+
+# set rownames to sample IDs for DESeq2 alignment
+rownames(metadata) <- metadata$sample_id
+
+# verify
+head(rownames(metadata))  # should now show GSM158xxxx
+```
+
+```{r}
+write.csv(metadata, "data/metadata.csv", row.names = FALSE)
+message("✓ metadata.csv written — ", nrow(metadata), " samples")
+```
+
+```{r}
+# ── 2. DESeq2: normalized counts + DE results ────────────────
+raw_counts <- read_tsv(
+  "data/GSE64810_raw_counts_GRCh38.p13_NCBI.tsv",
+  col_names = TRUE, show_col_types = FALSE
+) %>%
+  filter(complete.cases(.)) %>%
+  column_to_rownames("GeneID")
+ 
+# Align metadata rows to count matrix columns
+meta_aligned           <- metadata
+rownames(meta_aligned) <- meta_aligned$sample_id
+meta_aligned           <- meta_aligned[colnames(raw_counts), ]
+ 
+dds <- DESeqDataSetFromMatrix(
+  countData = raw_counts,
+  colData   = meta_aligned,
+  design    = ~ diagnosis
+)
+dds <- DESeq(dds)
+res <- results(dds)
+```
+
+```{r}
+set.seed(42)
+fgsea_res <- fgsea(pathways = pathways, stats = ranks, nperm = 10000)
+ 
+fgsea_res %>%
+  as.data.frame() %>%
+  dplyr::select(pathway, NES, pval, padj, size) %>%
+  write.csv("data/fgsea_results.csv", row.names = FALSE)
+message("✓ fgsea_results.csv written")
+```
+
+```{r}
+message("All done. Four CSVs in sample code/data/:")
+message("  metadata.csv, normalized_counts.csv, deseq2_results.csv, fgsea_results.csv")
+```
+
